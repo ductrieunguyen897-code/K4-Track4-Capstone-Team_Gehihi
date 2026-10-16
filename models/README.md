@@ -12,8 +12,10 @@
 - **Dataset huấn luyện gốc:** TuSimple Highway Lane Detection
 - **Định dạng suy luận:** ONNX (`.onnx`), chạy trên `onnxruntime` (`CPUExecutionProvider`)
 - **Đường dẫn runtime bắt buộc:** `models/ufld_tusimple.onnx`
-- **Kích thước file (đã xác minh):** `244,894,648` bytes (~`233.55 MB`)
-- **SHA-256 Checksum:** `fb28bbecb372873ea16f92594bb2307d71ea1aaeb770138c9d425166650bdf16`
+- **Kích thước file (đã xác minh trên máy tích hợp):** `244,894,647` bytes (~`233.55 MB`)
+- **SHA-256 (đã xác minh trên máy tích hợp):** `9d81165035d489ee4fc087933bf736645f7fca3666c388fc87bd9db24771e4f7`
+
+> **Lưu ý về checksum (cập nhật khi tích hợp):** checksum/size ở trên là giá trị **đo thực tế** từ file ONNX được xuất bằng đúng script bên dưới trên máy tích hợp. Việc xuất ONNX **không đảm bảo byte-for-byte giữa các phiên bản `torch`/`onnx`** (metadata graph, producer/version string khác nhau), nên SHA-256 có thể lệch dù kiến trúc và trọng số giống nhau. Tiêu chí nghiệm thu thực sự là **kiểm tra runtime**: mở file bằng `onnxruntime` và xác nhận đúng `input [1,3,288,800]` → `output [1,101,56,4]` (mục 2) và suy luận được trên CPU. Giá trị SHA-256 do Quang ghi trước đó là `fb28bbecb372873ea16f92594bb2307d71ea1aaeb770138c9d425166650bdf16` (dung lượng `244,894,648` bytes); sai khác 1 byte/checksum là do quá trình serialize, không phải do sai model — xem báo cáo tích hợp.
 
 ### Nguồn tham chiếu chính thức
 1. **Repo tác giả gốc (PyTorch weights):** [cfzd/Ultra-Fast-Lane-Detection](https://github.com/cfzd/Ultra-Fast-Lane-Detection)

@@ -33,10 +33,9 @@ Planned / required for the 2-hour MVP (P0):
   lanes; export a per-frame CSV.
 - A Gradio UI: upload → Analyze → video + metrics + CSV.
 
-> Status note: this README describes the **target** product. Modules are built in
-> parallel on separate branches; check each module's status before assuming a
-> feature is complete. No benchmark numbers appear here until they are measured
-> (see §7).
+> Status note: the modules described here are integrated on `integration-final`
+> and verified end-to-end with the real pretrained ONNX model and real video
+> (see §7). Benchmark numbers in this README are measured, not estimated.
 
 ---
 
@@ -190,11 +189,22 @@ highway, yellow-lane and a curve/shadow "challenge" clip. Download with
 ## 7. Benchmarks
 
 Measured results go in `results/`. **No numbers are published here until they
-are measured on real hardware** — see `results/benchmark_report.md` after a run.
+are measured on real hardware** — see `results/benchmark_<clip>_report.md` after
+a run.
 
-| Clip | Processing FPS | Avg latency (ms) | Valid-lane ratio | WARNING frames | Machine |
-|---|---|---|---|---|---|
-| _(not measured yet)_ | — | — | — | — | — |
+Measured on the real pretrained `models/ufld_tusimple.onnx` with the full
+`detect → track → analyze → render` pipeline (`benchmark.py`, ONNX Runtime CPU):
+
+| Clip | Frames | Processing FPS | Avg inference (ms) | Valid-lane ratio | WARNING frames | Machine |
+|---|---|---|---|---|---|---|
+| `data/sample_lines.mp4` | 221 | 12.82 | 66.71 | 221 / 221 (100.0%) | 0 | AMD64 12-CPU, Python 3.13.13 |
+| `data/sample_challenge.mp4` | 251 | 16.01 | 49.56 | 251 / 251 (100.0%) | 0 | AMD64 12-CPU, Python 3.13.13 |
+
+Both clips are highway clips, which is the domain the pretrained UFLD model was
+trained on, so it finds two boundaries on essentially every frame — a 100%
+valid-lane ratio here is **not** evidence of accuracy on harder roads (see §8).
+Per-run artefacts: `results/benchmark_<clip>_report.md`, `_metrics.json`,
+`_latency.png` (and `_summary.csv`).
 
 Interpretation rules (kept honest):
 
@@ -226,5 +236,5 @@ Interpretation rules (kept honest):
 | Triệu | `trieu` | `app.py`, `src/video.py`, `src/visualizer.py`, `requirements.txt`, `.gitignore`, `tests/test_pipeline.py` |
 | Thân | `than` | `benchmark.py`, `README.md`, `data/README.md`, `docs/presentation.md`, `scripts/download_samples.py`, `tests/smoke_test.py` |
 
-Each member pushes their own branch. Integration happens locally on
-`integration-local`; `main` is not pushed by individual members.
+Each member pushes their own branch. Integration happens on the
+`integration-final` branch, which is then fast-forwarded into `main`.

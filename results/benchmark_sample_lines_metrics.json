@@ -1,0 +1,29 @@
+{
+  "metrics": {
+    "frames_processed": 221,
+    "csv_rows": 221,
+    "processing_seconds": 17.245,
+    "processing_fps": 12.82,
+    "video_fps": 25.0,
+    "avg_inference_ms": 66.71,
+    "mean_tracker_ms": 0.851131221719457,
+    "valid_lane_frames": 221,
+    "valid_lane_ratio": 1.0,
+    "warning_frames": 0,
+    "warning_ratio": 0.0,
+    "caution_frames": 0,
+    "safe_frames": 221,
+    "unknown_frames": 0,
+    "offset_none_frames": 0,
+    "failed_frames": 0,
+    "csv_missing_columns": []
+  },
+  "machine": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "processor": "AMD64 Family 25 Model 68 Stepping 1, AuthenticAMD",
+    "python": "3.13.13",
+    "machine": "AMD64",
+    "cpu_count": "12"
+  },
+  "run_utc": "2026-10-16 09:37:20"
+}
