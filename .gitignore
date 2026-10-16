@@ -1,1 +1,26 @@
+# Virtual environments
 .venv/
+venv/
+ENV/
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Project outputs & results (auto-generated)
+outputs/
+results/*.mp4
+results/*.csv
+
+# Large assets - model weights & test videos (do not commit)
+models/*.onnx
+data/*.mp4
+data/*.avi
+data/*.mkv
+data/*.mov
+
+# Gradio cache & temporary files
+.gradio/
+tmp/
