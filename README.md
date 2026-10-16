@@ -1,7 +1,230 @@
-# K4 Track 4 Project Capstone — Vin Perception Hackathon
+# LaneGuard AI
 
-Trang đề bài hackathon cuối khóa Track 4 (Computer Vision & Robotics): 2 giờ build, 10 phút demo mỗi team, đề tài gắn với hệ sinh thái Vin.
+**LaneGuard AI** is a local web app that analyzes a recorded dashcam video and
+shows an illustrative estimate of the lane the vehicle is in. It runs a
+pretrained **UFLD ONNX** lane-detection model (inference only), tracks the lane
+markings across frames with OpenCV, estimates the vehicle's position relative to
+the lane center in **image coordinates**, and renders an overlay video plus a CSV
+of per-frame metrics.
 
-- `index.html`: trang đề bài (một file, không cần build). Mở trực tiếp bằng trình duyệt.
+> **Demo only.** LaneGuard AI is not a car safety system and must not be used to
+> make driving decisions. It does not report distance in metres, road curvature
+> in 1/m, or validated ADAS-grade lane-departure warnings — the camera is not
+> calibrated and the outputs are not validated against ground truth.
 
-Nội dung gồm hướng đề tài gợi ý, bốn yêu cầu của mỗi demo, bảy trụ cột Track 4, công cụ gợi ý, thang điểm, lịch trình, checklist trước demo và FAQ. Ngày giờ, địa điểm, giám khảo, giải thưởng sẽ được ban tổ chức cập nhật.
+This README is the entry point for the merged project. The API contract that
+every module must satisfy is in **[`tasks/PROJECT_OVERVIEW.md`](tasks/PROJECT_OVERVIEW.md)**
+(the single source of truth). The original hackathon brief page is
+[`index.html`](index.html).
+
+---
+
+## 1. What it does (features)
+
+Planned / required for the 2-hour MVP (P0):
+
+- Accept an `.mp4` dashcam clip and produce a browser-playable output video.
+- Run a **pretrained UFLD ONNX** model per frame (no training / fine-tuning).
+- Track lane polylines across frames with stable IDs and EMA smoothing.
+- Find the two lane boundaries bracketing the camera axis, draw the lane center.
+- Compute a **normalized** offset (not metres) and a demo warning
+  `SAFE` / `CAUTION` / `WARNING` / `UNKNOWN`.
+- Report measured FPS, inference latency, and the share of frames with valid
+  lanes; export a per-frame CSV.
+- A Gradio UI: upload → Analyze → video + metrics + CSV.
+
+> Status note: this README describes the **target** product. Modules are built in
+> parallel on separate branches; check each module's status before assuming a
+> feature is complete. No benchmark numbers appear here until they are measured
+> (see §7).
+
+---
+
+## 2. Architecture
+
+```text
+Video (mp4)
+   │
+   ▼
+UFLD ONNX detector ──► Tracker ──► Geometry ──► Overlay / UI
+ (src/detector.py)   (src/tracker.py) (src/geometry.py) (src/visualizer.py)
+                                                 │
+                                                 ▼
+                                        Gradio app (app.py)
+                                        CSV + summary metrics
+```
+
+Text flow: `Video → UFLD ONNX → Tracker → Geometry → Overlay/UI`.
+
+- **detector** (`src/detector.py`) — `LaneDetector.detect(frame_bgr) -> dict`
+- **tracker** (`src/tracker.py`) — `LaneTracker.update(detection) -> dict`
+- **geometry** (`src/geometry.py`) — `analyze_lanes(tracking, camera_center_ratio) -> dict`
+- **visualizer / video / app** (`src/visualizer.py`, `src/video.py`, `app.py`)
+  — `render_frame(...)`, `process_video(...)`, `build_app()`
+
+Full signatures and output schemas: [`tasks/PROJECT_OVERVIEW.md`](tasks/PROJECT_OVERVIEW.md) §5.
+
+---
+
+## 3. Project structure
+
+```text
+K4-Track4-Capstone-Team_Gehihi/
+├── app.py                     # Gradio web app              (Triệu)
+├── requirements.txt           # Python dependencies         (Triệu)
+├── benchmark.py               # performance benchmark CLI   (Thân)
+├── README.md                  # this file                   (Thân)
+├── index.html                 # hackathon brief page
+├── src/
+│   ├── detector.py            # UFLD ONNX inference         (Quang)
+│   ├── tracker.py             # temporal lane association   (Việt Anh)
+│   ├── geometry.py            # offset + warning rules      (Diện)
+│   ├── video.py               # video pipeline              (Triệu)
+│   └── visualizer.py          # overlay rendering           (Triệu)
+├── models/
+│   ├── README.md              # weights source & setup       (Quang)
+│   └── ufld_tusimple.onnx     # model (NOT committed)
+├── data/
+│   ├── README.md              # sample clip sources/license  (Thân)
+│   └── sample_*.mp4           # clips (NOT committed)
+├── docs/
+│   └── presentation.md        # pitch slides + demo script   (Thân)
+├── scripts/
+│   └── download_samples.py    # fetch sample videos          (Thân)
+├── tests/
+│   ├── test_detector.py       # (Quang)
+│   ├── test_tracker.py        # (Việt Anh)
+│   ├── test_geometry.py       # (Diện)
+│   ├── test_pipeline.py       # (Triệu)
+│   └── smoke_test.py          # integration smoke tests      (Thân)
+├── outputs/                   # runtime outputs (NOT committed)
+└── results/                   # small measured reports (may commit)
+```
+
+---
+
+## 4. Quick start
+
+Requires **Python 3.10+** (tested on 3.13). Windows, macOS or Linux.
+
+```bash
+# 1. clone and enter
+git clone <REPO_URL>
+cd K4-Track4-Capstone-Team_Gehihi
+
+# 2. virtual environment
+python -m venv .venv
+
+# Windows PowerShell:
+.venv\Scripts\Activate.ps1
+# macOS / Linux:
+# source .venv/bin/activate
+
+# 3. dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. download the pretrained UFLD ONNX weights into models/ufld_tusimple.onnx
+#    (source + exact steps: models/README.md)
+
+# 5. (optional) download the sample test clips into data/
+python scripts/download_samples.py
+
+# 6. run the app
+python app.py
+# then open the local URL it prints (default http://127.0.0.1:7860)
+```
+
+> `requirements.txt` and `app.py` are owned by Triệu; if a dependency is missing,
+> tell Triệu rather than editing those files yourself.
+
+### Benchmark
+
+```bash
+python benchmark.py --input data/sample_lines.mp4 --model models/ufld_tusimple.onnx --max-frames 300
+```
+
+Writes `results/benchmark_<clip>_report.md`, `_summary.csv`, `_metrics.json` and
+(if matplotlib is present) `_latency.png`. Before the pipeline exists you can
+still check the benchmark code itself:
+
+```bash
+python benchmark.py --self-test     # synthetic data - NOT a benchmark
+```
+
+### Smoke tests
+
+```bash
+python tests/smoke_test.py --check-files               # post-integration file check
+python tests/smoke_test.py --check-output outputs/demo_processed.mp4
+python tests/smoke_test.py --mock                      # synthetic wiring check only
+```
+
+---
+
+## 5. Getting the pretrained model
+
+LaneGuard AI uses a **pretrained, inference-only** UFLD ONNX model. No training
+or fine-tuning is performed.
+
+- Reference inference code: https://github.com/ibaiGorordo/onnx-Ultra-Fast-Lane-Detection-Inference
+- ONNX model collection: https://github.com/PINTO0309/PINTO_model_zoo/tree/main/140_Ultra-Fast-Lane-Detection
+- Original UFLD: https://github.com/cfzd/Ultra-Fast-Lane-Detection
+
+Place the downloaded file at **`models/ufld_tusimple.onnx`**. The runtime filename
+is internal — verify the real input/output shapes and the license before use.
+Exact download steps and checksums (when available) live in **`models/README.md`**
+(owned by Quang). Model weights are **not committed** to git.
+
+---
+
+## 6. Sample data
+
+Three short, free test clips (Udacity `CarND-LaneLines-P1`, **MIT License**):
+highway, yellow-lane and a curve/shadow "challenge" clip. Download with
+`python scripts/download_samples.py`. Sources, sizes and the test matrix are in
+**[`data/README.md`](data/README.md)**. The `.mp4` files are not committed.
+
+---
+
+## 7. Benchmarks
+
+Measured results go in `results/`. **No numbers are published here until they
+are measured on real hardware** — see `results/benchmark_report.md` after a run.
+
+| Clip | Processing FPS | Avg latency (ms) | Valid-lane ratio | WARNING frames | Machine |
+|---|---|---|---|---|---|
+| _(not measured yet)_ | — | — | — | — | — |
+
+Interpretation rules (kept honest):
+
+- *Processing FPS* is throughput on the test machine — **not** the source clip FPS.
+- *Valid-lane ratio* is the share of frames with usable geometry — **not** accuracy / F1.
+- *WARNING frames* counts only `warning == WARNING`; `CAUTION` is separate.
+
+---
+
+## 8. Limitations
+
+- Camera is **not calibrated**: offsets are normalized image coordinates, not metres.
+- Warnings are **demo rules**, not validated lane-departure warnings.
+- Model is a pretrained highway-lane model; it may fail on **Vietnamese urban
+  roads**, heavy rain, night, glare, worn markings, or complex junctions.
+- Valid-lane ratio is not accuracy — there is no ground-truth labelling.
+- Output video codec depends on the environment (OpenCV `mp4v` or FFmpeg H.264);
+  browser playback should be verified on the demo machine.
+
+---
+
+## 9. Team & branches
+
+| Member | Branch | Owns |
+|---|---|---|
+| Quang | `quang` | `src/detector.py`, `models/README.md`, `tests/test_detector.py` |
+| Việt Anh | `viet-anh` | `src/tracker.py`, `tests/test_tracker.py` |
+| Diện | `dien` | `src/geometry.py`, `tests/test_geometry.py` |
+| Triệu | `trieu` | `app.py`, `src/video.py`, `src/visualizer.py`, `requirements.txt`, `.gitignore`, `tests/test_pipeline.py` |
+| Thân | `than` | `benchmark.py`, `README.md`, `data/README.md`, `docs/presentation.md`, `scripts/download_samples.py`, `tests/smoke_test.py` |
+
+Each member pushes their own branch. Integration happens locally on
+`integration-local`; `main` is not pushed by individual members.
