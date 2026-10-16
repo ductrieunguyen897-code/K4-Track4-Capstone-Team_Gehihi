@@ -16,6 +16,8 @@ results/*.csv
 
 # Large assets - model weights & test videos (do not commit)
 models/*.onnx
+models/*.pth
+models/*.part
 data/*.mp4
 data/*.avi
 data/*.mkv

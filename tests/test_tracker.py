@@ -99,6 +99,15 @@ class LaneTrackerTests(unittest.TestCase):
         self.assertEqual([t["track_id"] for t in tracks], [1, 2, 3])
         self.assertTrue(all(not t["predicted"] for t in tracks))
 
+    def test_global_association_avoids_greedy_identity_loss(self):
+        """Keep both identities when the nearest pair blocks a feasible match."""
+        tracker = LaneTracker(alpha=1)
+        tracker.update(frame(lane(100), lane(140)))
+        tracks = tracker.update(frame(lane(125), lane(180)))["lanes"]
+        self.assertEqual([t['track_id'] for t in tracks], [1, 2])
+        self.assertEqual([t['points'][0][0] for t in tracks], [125, 180])
+        self.assertTrue(all(not t['predicted'] for t in tracks))
+
     def test_matching_threshold_and_width_normalization(self):
         """Accept distance at the gate and reject movement just beyond it."""
         for width, shift, ids in ((1000, 80, [1]), (1000, 81, [1, 2]),

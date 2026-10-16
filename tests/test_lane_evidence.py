@@ -43,6 +43,26 @@ def test_sky_evidence_and_short_vehicle_edge_do_not_form_road_lane():
     assert lanes == []
 
 
+def test_marking_support_scales_to_the_visible_road_after_camera_crop():
+    frame = np.full((720, 1280, 3), 65, np.uint8)
+    cv2.line(frame, (300, 520), (300, 600), (245, 245, 245), 7)
+    lanes, _ = refine_lanes([proposal([[300, 505], [300, 700]])],
+                            marking_response(frame), 1280, 720, road_start=.6975)
+    assert len(lanes) == 1
+    assert lanes[0]['points'][0][1] >= 505
+
+
+def test_dashed_marking_keeps_model_samples_across_bounded_near_field_gap():
+    frame = np.full((720, 1280, 3), 65, np.uint8)
+    for start, end in [(400, 480), (540, 585)]:
+        cv2.line(frame, (300, start), (300, end), (245, 245, 245), 7)
+    lane = proposal([[300, 380], [300, 700]])
+    lanes, _ = refine_lanes([lane], marking_response(frame), 1280, 720)
+    assert len(lanes) == 1
+    assert 648 <= lanes[0]['points'][-1][1] <= 700
+    assert max(abs(x - 300) for x, _ in lanes[0]['points']) <= 6
+
+
 def test_horizon_distinguishes_camera_with_large_sky_area():
     def road(vanish_y):
         frame = np.full((720, 1280, 3), 65, np.uint8)
@@ -74,6 +94,23 @@ def test_detector_reset_discards_previous_automatic_camera_crop():
     detector._frame_size = (1920, 1080)
     detector.reset()
     assert detector._selected_crop is None and detector._frame_size is None
+
+
+@pytest.mark.parametrize('crop', [1.0, .6, .8])
+def test_preprocessing_keeps_rgb_normalization_and_training_crop_exact(crop):
+    detector = object.__new__(LaneDetector)
+    detector.input_width, detector.input_height = 800, 320
+    detector.training_crop_ratio = crop
+    frame = np.random.default_rng(42).integers(0, 256, (360, 640, 3), dtype=np.uint8)
+    original = frame.copy()
+    actual = detector._preprocess(frame)
+    resized = cv2.resize(frame, (800, int(320 / crop)))[-320:]
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+    expected = ((rgb - np.array([.485, .456, .406], np.float32))
+                / np.array([.229, .224, .225], np.float32)).transpose(2, 0, 1)[None]
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+    assert actual.dtype == np.float32 and actual.flags.c_contiguous
+    np.testing.assert_array_equal(frame, original)
 
 
 @pytest.mark.parametrize('horizon,expected', [(0.56, 0.0), (0.744, 0.45), (0.765, 0.45)])

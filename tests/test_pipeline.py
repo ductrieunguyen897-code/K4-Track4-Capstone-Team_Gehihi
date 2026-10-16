@@ -302,6 +302,35 @@ class TestVideoPipeline(unittest.TestCase):
             reader = list(csv.reader(f))
             self.assertEqual(len(reader), 21)
 
+    def test_seek_preserves_source_timestamps_and_limits_remaining_frames(self):
+        cap = cv2.VideoCapture(self.synthetic_video)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        _, first_source_frame = cap.read()
+        cap.release()
+        detector = MockLaneDetector()
+        calibration_frames = []
+        detector.calibrate = lambda frame: calibration_frames.append(frame.copy())
+        result = process_video(
+            input_path=self.synthetic_video,
+            output_path=os.path.join(self.test_dir, 'seek.mp4'),
+            model_path='unused.onnx', start_time_s=1.0, max_frames=100,
+            detector=detector, tracker=MockLaneTracker(), analyzer=mock_analyze_lanes_safe)
+        with open(result['csv_path'], encoding='utf-8') as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(int(rows[0]['frame_index']), round(fps))
+        self.assertAlmostEqual(float(rows[0]['time_s']), 1.0)
+        self.assertEqual(result['summary']['frames_processed'], 60 - round(fps))
+        self.assertAlmostEqual(result['summary']['source_start_seconds'], 1.0)
+        self.assertEqual(len(calibration_frames), 1)
+        np.testing.assert_array_equal(calibration_frames[0], first_source_frame)
+
+    def test_invalid_start_timestamp_fails_explicitly(self):
+        for start in (-1, float('nan'), float('inf'), True, 1000):
+            with self.subTest(start=start), self.assertRaises(ValueError):
+                process_video(self.synthetic_video, os.path.join(self.test_dir, 'bad_start.mp4'),
+                    'unused.onnx', start_time_s=start, detector=MockLaneDetector(),
+                    tracker=MockLaneTracker(), analyzer=mock_analyze_lanes_safe)
+
     def test_pipeline_warning_counter(self):
         output_video = os.path.join(self.test_dir, "output_warn.mp4")
         detector = MockLaneDetector()
@@ -380,13 +409,31 @@ class TestGradioApp(unittest.TestCase):
                 model_path = os.path.join(directory, 'model.onnx')
                 for path in (video_path, model_path):
                     open(path, 'wb').close()
-                with patch('app.process_video', return_value=result) as process:
+                with patch('app.get_detector'), patch('app.process_video', return_value=result) as process:
                     video, _, _, message = analyze_video_callback(
-                        video_path, 0.5, model_path, 10, False, road_crop_ratio=crop)
+                        video_path, 0.5, model_path, 10, False, road_crop_ratio=crop,
+                        start_time_s=3, device='cpu', reference_y_ratio=.92)
                 self.assertEqual(process.call_args.kwargs['road_crop_ratio'], expected)
+                self.assertEqual(process.call_args.kwargs['start_time_s'], 3)
+                self.assertEqual(process.call_args.kwargs['device'], 'cpu')
+                self.assertEqual(process.call_args.kwargs['reference_y_ratio'], .92)
                 self.assertEqual(video, 'preview.mp4')
                 self.assertIn('2 frame', message)
                 self.assertNotIn('hoàn tất thành công', message)
+
+    def test_callback_distinguishes_no_lane_result_from_success(self):
+        summary = dict(frames_processed=10, processing_seconds=1, processing_fps=10,
+                       video_fps=30, avg_inference_ms=50, valid_lane_frames=0,
+                       warning_frames=0, failed_frames=0)
+        result = dict(output_video='preview.mp4', csv_path='preview.csv', summary=summary)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'input.mp4')
+            open(path, 'wb').close()
+            with patch('app.get_detector'), patch('app.process_video', return_value=result):
+                video, _, _, message = analyze_video_callback(path, .5, path, 10, False)
+        self.assertEqual(video, 'preview.mp4')
+        self.assertIn('chưa xác định', message)
+        self.assertNotIn('hoàn tất thành công', message)
 
     def test_analyze_callback_missing_video(self):
         video, summary, csv_file, msg = analyze_video_callback(

@@ -1,6 +1,6 @@
 """CPU lane association, EMA smoothing, and bounded hold-last tracking.
 
-Only NumPy and the standard library are required. Call update in frame order
+Uses NumPy and SciPy's assignment solver. Call update in frame order
 and reset between videos. No detector, model, or future frame is accessed.
 """
 
@@ -8,12 +8,13 @@ from numbers import Integral, Real
 from time import perf_counter
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 
 class LaneTracker:
     """Track lane polylines by geometry, independently of detector lane_index.
 
-    Greedy one-to-one matching uses mean horizontal distance / frame width
+    Global one-to-one matching uses mean horizontal distance / frame width
     at eight evenly spaced y samples in each pair's observed overlap. Pairs
     need two distinct shared y values and distance <= 0.08. EMA uses the union
     of polyline vertices within the current observation, never extrapolating.
@@ -22,7 +23,7 @@ class LaneTracker:
     confidence inflation. IDs increase until reset; output is ordered by ID.
 
     This stateful tracker is intended for one sequential video stream.
-    Greedy matching can swap IDs when lanes cross or move abruptly. The
+    Matching can swap IDs when lanes cross or move abruptly. The
     threshold needs validation on real video; it is an MVP default.
     """
 
@@ -98,9 +99,22 @@ class LaneTracker:
                     candidates.append((distance, track_id, index))
 
         matched_tracks, matched_observations = set(), set()
-        for _, track_id, index in sorted(candidates):
-            if track_id in matched_tracks or index in matched_observations:
-                continue
+        # Minimize the total association cost after maximizing valid matches.
+        # Greedy nearest-pair selection can consume the only observation that
+        # another track can match, creating a ghost and a duplicate ID.
+        track_ids = sorted(self._tracks)
+        assignments = []
+        if track_ids and observations:
+            positions = {track_id: i for i, track_id in enumerate(track_ids)}
+            unmatched_cost = float(len(track_ids) + len(observations) + 1)
+            costs = np.full((len(track_ids), len(observations) + len(track_ids)), unmatched_cost)
+            costs[:, :len(observations)] = unmatched_cost * 2
+            for distance, track_id, index in candidates:
+                costs[positions[track_id], index] = distance
+            row_indices, column_indices = linear_sum_assignment(costs)
+            assignments = [(track_ids[row], col) for row, col in zip(row_indices, column_indices)
+                           if col < len(observations) and costs[row, col] < unmatched_cost]
+        for track_id, index in assignments:
             track = self._tracks[track_id]
             observation = observations[index]
             track["points"] = self._smooth(track["points"], observation["points"])

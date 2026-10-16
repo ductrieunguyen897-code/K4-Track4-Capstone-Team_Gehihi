@@ -1,7 +1,7 @@
 """UFLD ONNX Lane Detection module for LaneGuard AI.
 
 Owner: Quang (branch `quang`)
-Contract reference: tasks/PROJECT_OVERVIEW.md (Section 5.1 & 5.2)
+Input/output and model setup are documented in README.md and models/README.md.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import numpy as np
 import onnxruntime as ort
 
 from src.lane_evidence import estimate_horizon, marking_response, refine_lanes
+from src.ufld_v2 import OUTPUT_NAMES as V2_OUTPUT_NAMES, configuration as v2_configuration, decode as decode_v2
 
 # Standard row anchors defined in the 288-height coordinate system of UFLD
 TUSIMPLE_ROW_ANCHOR: list[int] = [
@@ -81,6 +82,8 @@ class LaneDetector:
 
         self.model_path = model_path
         self.device = (device or "cpu").lower()
+        if self.device not in {"cpu", "auto", "cuda", "cuda:0"}:
+            raise ValueError("device must be cpu, auto or cuda")
         if road_crop_ratio is not None and (
             isinstance(road_crop_ratio, bool) or not isinstance(road_crop_ratio, (int, float))
             or not math.isfinite(road_crop_ratio) or not 0 <= road_crop_ratio <= 0.5
@@ -91,7 +94,16 @@ class LaneDetector:
 
         available_providers = ort.get_available_providers()
         providers: list[str] = []
-        if self.device.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
+        if self.device.startswith("cuda") and "CUDAExecutionProvider" not in available_providers:
+            raise ValueError("CUDA is unavailable; install the optional GPU runtime or select auto/cpu")
+        if self.device != "cpu" and "CUDAExecutionProvider" in available_providers:
+            # PyTorch's optional CUDA installation supplies compatible DLLs on
+            # Windows. CPU-only installations never import torch.
+            try:
+                import torch  # noqa: F401
+            except ImportError:
+                if hasattr(ort, "preload_dlls"):
+                    ort.preload_dlls()
             providers.append("CUDAExecutionProvider")
         if "CPUExecutionProvider" in available_providers:
             providers.append("CPUExecutionProvider")
@@ -100,6 +112,7 @@ class LaneDetector:
 
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.intra_op_num_threads = min(4, os.cpu_count() or 1)
 
         try:
             self.session = ort.InferenceSession(
@@ -124,7 +137,19 @@ class LaneDetector:
         self.input_width: int = int(in_w) if isinstance(in_w, int) and in_w > 0 else 800
 
         # Inspect output metadata
-        output_meta = self.session.get_outputs()[0]
+        output_metadata = self.session.get_outputs()
+        self.model_kind = "ufld_v2" if {item.name for item in output_metadata} == set(V2_OUTPUT_NAMES) else "ufld_v1"
+        self.output_names = [item.name for item in output_metadata]
+        self.training_crop_ratio = 1.0
+        if self.model_kind == "ufld_v2":
+            row_metadata = next(item for item in output_metadata if item.name == 'loc_row')
+            _, self.training_crop_ratio = v2_configuration(row_metadata.shape[2])
+        elif len(output_metadata) != 1:
+            raise ValueError("Unsupported lane model outputs; expected UFLD v1 or v2 logits")
+        self.execution_provider = self.session.get_providers()[0]
+        if self.device.startswith('cuda') and self.execution_provider != 'CUDAExecutionProvider':
+            raise RuntimeError('CUDA initialization failed; select auto/cpu or check the GPU runtime installation')
+        output_meta = output_metadata[0]
         self.output_name: str = output_meta.name
         self.output_shape = output_meta.shape
 
@@ -171,13 +196,16 @@ class LaneDetector:
         """Convert BGR uint8 frame to normalized NCHW float32 tensor without modifying input."""
         img_resized = cv2.resize(
             frame_bgr,
-            (self.input_width, self.input_height),
+            (self.input_width, int(self.input_height / getattr(self, 'training_crop_ratio', 1.0))),
             interpolation=cv2.INTER_LINEAR,
         )
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB).astype(np.float32)
-        img_norm = img_rgb * _NORM_SCALE + _NORM_BIAS
-        chw = img_norm.transpose(2, 0, 1)
-        return np.ascontiguousarray(chw[np.newaxis, :, :, :], dtype=np.float32)
+        img_resized = img_resized[-self.input_height:]
+        # Copy directly to contiguous RGB/NCHW once, then normalize in place.
+        # This avoids several full-resolution float32 intermediate images.
+        chw = np.ascontiguousarray(img_resized.transpose(2, 0, 1)[::-1], dtype=np.float32)
+        chw *= _NORM_SCALE[:, None, None]
+        chw += _NORM_BIAS[:, None, None]
+        return chw[np.newaxis]
 
     def _decode_output(
         self, raw_output: np.ndarray, frame_w: int, frame_h: int
@@ -274,12 +302,31 @@ class LaneDetector:
         self._selected_crop = self.road_crop_ratio
         self._frame_size = None
 
+    def calibrate(self, frame_bgr: np.ndarray) -> None:
+        """Set camera framing without inference, using the video's first frame."""
+        height, width = self._validate_frame(frame_bgr)
+        self._calibrate_response(marking_response(frame_bgr), width, height)
+
+    def _calibrate_response(self, response: np.ndarray, width: int, height: int) -> None:
+        if self._frame_size != (width, height):
+            self.reset()
+            self._frame_size = (width, height)
+        if self._selected_crop is None:
+            horizon = estimate_horizon(response)
+            target_crop = max(0.0, min(0.45, (horizon - 0.55) / 0.45))
+            self._selected_crop = (min((0.2, 0.35, 0.45), key=lambda crop: abs(crop - target_crop))
+                                   if horizon > 0.64 else 0.0)
+
     def _detect_crop(self, frame_bgr: np.ndarray, crop: float) -> list[dict[str, Any]]:
         height, width = frame_bgr.shape[:2]
         top = round(height * crop)
         tensor = self._preprocess(frame_bgr[top:])
-        output = self.session.run([self.output_name], {self.input_name: tensor})[0]
-        lanes = self._decode_output(output, frame_w=width, frame_h=height - top)
+        if getattr(self, 'model_kind', 'ufld_v1') == 'ufld_v2':
+            output = self.session.run(self.output_names, {self.input_name: tensor})
+            lanes = decode_v2(dict(zip(self.output_names, output)), width, height - top)
+        else:
+            output = self.session.run([self.output_name], {self.input_name: tensor})[0]
+            lanes = self._decode_output(output, frame_w=width, frame_h=height - top)
         for lane in lanes:
             for point in lane['points']:
                 point[1] += top
@@ -290,19 +337,8 @@ class LaneDetector:
         frame_h, frame_w = self._validate_frame(frame_bgr)
 
         t0 = time.perf_counter()
-        if self._frame_size != (frame_w, frame_h):
-            self.reset()
-            self._frame_size = (frame_w, frame_h)
         response = marking_response(frame_bgr)
-        if self._selected_crop is None:
-            horizon = estimate_horizon(response)
-            # Calibrate once so per-frame crop changes do not shake the overlay.
-            # Bring the estimated horizon near the training framing. Do not
-            # select by the number of detections: vehicles and compression can
-            # change that count even when the camera itself has not moved.
-            target_crop = max(0.0, min(0.45, (horizon - 0.55) / 0.45))
-            self._selected_crop = (min((0.2, 0.35, 0.45), key=lambda crop: abs(crop - target_crop))
-                                   if horizon > 0.64 else 0.0)
+        self._calibrate_response(response, frame_w, frame_h)
         proposed = self._detect_crop(frame_bgr, self._selected_crop)
         lanes, _ = refine_lanes(proposed, response, frame_w, frame_h,
                                 max(0.52, self._selected_crop + 0.45 * (1 - self._selected_crop)))

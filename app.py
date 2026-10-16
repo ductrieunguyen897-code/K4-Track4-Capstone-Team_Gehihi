@@ -1,7 +1,7 @@
 """LaneGuard AI — Dashcam Lane Departure Warning Web Application.
 
 Built with Gradio and OpenCV for local hackathon demonstration.
-Follows API Contract specified in PROJECT_OVERVIEW.md and TASK_TRIEU.md.
+Runs the detector, tracker and image-coordinate geometry documented in README.md.
 """
 
 import os
@@ -10,9 +10,11 @@ from typing import Tuple, Any, Dict, Optional
 import gradio as gr
 
 from src.video import process_video
+from src.runtime import get_detector
 
 
-DEFAULT_MODEL_PATH = "models/ufld_tusimple.onnx"
+DEFAULT_MODEL_PATH = ("models/ufldv2_culane_res18.onnx" if os.path.isfile("models/ufldv2_culane_res18.onnx")
+                      else "models/ufld_tusimple.onnx")
 
 
 def analyze_video_callback(
@@ -22,6 +24,9 @@ def analyze_video_callback(
     max_frames_input: float,
     process_all_frames: bool,
     road_crop_ratio: Optional[float] = None,
+    start_time_s: float = 0.0,
+    device: str = "auto",
+    reference_y_ratio: float = 0.9,
     progress=gr.Progress(),
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str], str]:
     """Execute video pipeline and return processed video, metrics, and CSV file.
@@ -56,8 +61,13 @@ def analyze_video_callback(
             f"⚠️ Định dạng file `{ext}` không được khuyến nghị. Vui lòng tải lên video `.mp4`.",
         )
 
-    # Determine max frames
-    limit_frames = None if process_all_frames else int(max_frames_input)
+    # Validate the frame limit before creating output folders.
+    try:
+        limit_frames = None if process_all_frames else int(max_frames_input)
+        if limit_frames is not None and limit_frames <= 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return None, None, None, "⚠️ Giới hạn frame phải là số nguyên dương."
 
     # Create unique run directory
     run_id = uuid.uuid4().hex[:8]
@@ -75,16 +85,19 @@ def analyze_video_callback(
             (
                 f"❌ **Không tìm thấy model weights tại: `{model_path}`**\n\n"
                 "**Hướng dẫn khắc phục:**\n"
-                "1. Tải file ONNX pretrained UFLD (theo hướng dẫn trong `tasks/PROJECT_OVERVIEW.md` mục 3).\n"
+                "1. Tải hoặc xuất model ONNX theo hướng dẫn trong `models/README.md`.\n"
                 f"2. Đổi tên và lưu vào thư mục: `{model_path}`.\n"
-                "3. Nhánh này đang chạy độc lập trước khi merge model của Quang. "
-                "Sau khi merge `origin/quang`, hệ thống sẽ kích hoạt inference AI tự động."
+                "3. Chọn lại đúng đường dẫn model trong cấu hình nâng cao."
             ),
         )
 
     try:
         def update_progress(ratio: float, desc: str):
             progress(ratio, desc=desc)
+
+        crop = None if road_crop_ratio == -1 else road_crop_ratio
+        progress(0, desc="Đang chuẩn bị mô hình nhận diện...")
+        detector = get_detector(model_path, device=device, road_crop_ratio=crop)
 
         result = process_video(
             input_path=video_path,
@@ -94,14 +107,21 @@ def analyze_video_callback(
             max_frames=limit_frames,
             progress_callback=update_progress,
             road_crop_ratio=None if road_crop_ratio == -1 else road_crop_ratio,
+            start_time_s=start_time_s,
+            device=device,
+            reference_y_ratio=reference_y_ratio,
+            detector=detector,
         )
 
         summary = result["summary"]
         csv_path = result["csv_path"]
         final_video = result["output_video"]
+        status_title = ("⚠️ **Đã xử lý video nhưng có frame lỗi.**" if summary['failed_frames'] else
+                        "⚠️ **Đã xử lý video, chưa xác định được đủ hai biên làn.**"
+                        if not summary['valid_lane_frames'] else "✅ **Phân tích hoàn tất thành công!**")
 
         status_msg = (
-            f"✅ **Phân tích hoàn tất thành công!**\n\n"
+            f"{status_title}\n\n"
             f"- **Đã xử lý:** {summary['frames_processed']} frames "
             f"({summary['processing_seconds']}s @ **{summary['processing_fps']} FPS** thực đo)\n"
             f"- **FPS nguồn:** {summary['video_fps']} FPS | "
@@ -113,8 +133,10 @@ def analyze_video_callback(
         )
         status_msg += "\n\nTỷ lệ đủ hai biên không phải độ chính xác nhận diện. UNKNOWN = chưa đủ bằng chứng để tính độ lệch."
         if summary['failed_frames']:
-            status_msg = status_msg.replace("✅ **Phân tích hoàn tất thành công!**", "⚠️ **Đã xử lý video nhưng có frame lỗi.**")
             status_msg += f"\n\n⚠️ **{summary['failed_frames']} frame lỗi xử lý.** Xem `frame_errors` trong thống kê."
+        if summary.get('execution_provider'):
+            backend = 'GPU NVIDIA' if summary['execution_provider'] == 'CUDAExecutionProvider' else 'CPU'
+            status_msg += f"\n\n**Thiết bị xử lý thực tế:** {backend}"
 
         return final_video, summary, csv_path, status_msg
 
@@ -174,10 +196,13 @@ def build_app() -> gr.Blocks:
                         label="Camera Center Ratio (Tâm xe / camera)",
                         info="0.5 = camera đặt chính giữa xe; <0.5 lệch trái; >0.5 lệch phải.",
                     )
-                    model_path_input = gr.Textbox(
-                        label="Đường dẫn ONNX Model Weights",
+                    model_path_input = gr.Dropdown(
+                        choices=[("UFLDv2 CULane (bổ sung)", "models/ufldv2_culane_res18.onnx"),
+                                 ("UFLDv1 TuSimple (model gốc)", "models/ufld_tusimple.onnx")],
+                        label="Mô hình nhận diện",
                         value=DEFAULT_MODEL_PATH,
-                        info="Model pretrained UFLD (mặc định: models/ufld_tusimple.onnx)",
+                        allow_custom_value=True,
+                        info="Chọn model có trên máy hoặc nhập đường dẫn ONNX khác.",
                     )
                     road_crop_input = gr.Dropdown(
                         choices=[("Tự động theo góc camera", -1.0),
@@ -189,6 +214,14 @@ def build_app() -> gr.Blocks:
                         label="Vùng ảnh nhận diện đường",
                         info="Nếu đường vẽ lệch lên trời, thử bỏ 35% hoặc 45% phía trên ảnh.",
                     )
+                    with gr.Row():
+                        start_time_input = gr.Number(value=0, minimum=0, step=1,
+                            label="Bắt đầu từ giây", info="Thử nhanh đoạn giữa hoặc cuối video.")
+                        device_input = gr.Dropdown(choices=[("Tự động", "auto"), ("CPU", "cpu"),
+                            ("GPU NVIDIA", "cuda")], value="auto", label="Thiết bị xử lý")
+                    reference_y_input = gr.Slider(minimum=.8, maximum=.95, value=.9, step=.01,
+                        label="Vị trí đo gần xe (tỷ lệ chiều cao ảnh)",
+                        info="0.9 = đo ở 90% chiều cao ảnh. Cần thấy đủ hai biên tại hàng này.")
                     with gr.Row():
                         max_frames_slider = gr.Slider(
                             minimum=30,
@@ -242,6 +275,9 @@ def build_app() -> gr.Blocks:
                 max_frames_slider,
                 process_all_checkbox,
                 road_crop_input,
+                start_time_input,
+                device_input,
+                reference_y_input,
             ],
             outputs=[
                 output_video,
@@ -249,6 +285,7 @@ def build_app() -> gr.Blocks:
                 csv_output,
                 status_box,
             ],
+            concurrency_limit=1,
         )
 
         gr.Markdown(

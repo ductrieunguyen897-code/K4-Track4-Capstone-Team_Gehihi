@@ -13,8 +13,8 @@ of per-frame metrics.
 > calibrated and the outputs are not validated against ground truth.
 
 This README is the entry point for the merged project. The API contract that
-every module must satisfy is in **[`tasks/PROJECT_OVERVIEW.md`](tasks/PROJECT_OVERVIEW.md)**
-(the single source of truth). The original hackathon brief page is
+the detector, tracker and video modules expose is documented in their Python
+docstrings and tests. The original hackathon brief page is
 [`index.html`](index.html).
 
 ---
@@ -61,7 +61,7 @@ Text flow: `Video → UFLD ONNX → Tracker → Geometry → Overlay/UI`.
 - **visualizer / video / app** (`src/visualizer.py`, `src/video.py`, `app.py`)
   — `render_frame(...)`, `process_video(...)`, `build_app()`
 
-Full signatures and output schemas: [`tasks/PROJECT_OVERVIEW.md`](tasks/PROJECT_OVERVIEW.md) §5.
+Full signatures and output schemas: the module docstrings in `src/`.
 
 ---
 
@@ -143,6 +143,8 @@ The detector now checks its proposals against nearby white/yellow marking
 contrast and applies a bounded correction to the visible curve. Unsupported
 proposals are removed; missing boundaries produce `UNKNOWN`. This check can
 also miss faint markings, and is not a calibrated confidence score.
+UFLDv2 proposals that fold back through column anchors or jump abruptly between
+nearby image rows are rejected before tracking to prevent zigzag overlays.
 
 **Vùng ảnh nhận diện đường** in the advanced settings selects camera framing.
 Automatic mode estimates the road horizon on the first frame and, for cameras
@@ -154,9 +156,30 @@ in `LaneDetector(..., road_crop_ratio=None)` and `process_video(...)`; `0.0`
 selects the full image. The tracker restores newly visible rows after an
 occlusion instead of permanently shortening a boundary.
 
+The UI reuses the last loaded model in a sequential analysis queue, resetting
+camera and tracking state for each video. This avoids loading large ONNX
+weights on every analysis. Replacing the weight file or changing device/crop
+loads a new session. Use **Bắt đầu từ giây** to inspect later sections without
+processing the entire prefix; CSV frame indices and timestamps retain the
+source-video position. Camera framing is calibrated from the original first
+frame even when analysis starts later, so seeking does not change calibration.
+
+Position measurement defaults to the 90% image row near the vehicle, adjustable
+under **Vị trí đo gần xe**. `analyze_lanes()` keeps its 85% API default for
+existing callers and accepts `reference_y_ratio`. No boundary is extrapolated
+to reach the measurement row. Association now maximizes one-to-one matches
+before minimizing total distance, reducing ID loss when close candidates compete.
+
+The optional UFLDv2 CULane model and GPU setup are described in
+[`models/README.md`](models/README.md). CPU remains supported. The UI reports
+the actual execution provider; explicit GPU requests fail clearly if unavailable.
+
 The summary includes `unknown_lane_frames`, `failed_frames` and up to five
 `frame_errors`; the UI flags processing errors instead of reporting unqualified
 success. A frame with two accepted boundaries is **not** an accuracy measurement.
+The summary also records model family, execution provider, camera crop,
+measurement row and source start time. See
+[`results/lane_v2_validation.md`](results/lane_v2_validation.md) for current validation.
 
 ### Benchmark command
 

@@ -1,5 +1,55 @@
 # UFLD Pretrained ONNX Model Weights (`models/ufld_tusimple.onnx`)
 
+## UFLDv2 CULane option
+
+The app also supports the author's pretrained UFLDv2 CULane ResNet18 model.
+It is inference-only and optional; the existing v1 model remains supported.
+When `models/ufldv2_culane_res18.onnx` exists, the UI selects it by default.
+The current measurements and remaining limits are in `results/lane_v2_validation.md`.
+
+```powershell
+# Export dependencies are optional and are not needed to run an existing ONNX.
+.venv/Scripts/python.exe -m pip install torch torchvision onnx
+.venv/Scripts/python.exe scripts/prepare_ufldv2.py
+```
+
+The script downloads the official checkpoint (~825 MB) to ignored `outputs/`,
+checks SHA-256, loads every parameter strictly and exports a self-contained
+ONNX file (~825 MB). The download is not a training dataset. Neither weights
+nor videos are committed. To reuse a checkpoint, pass `--checkpoint PATH`.
+The v2 network uses RGB, ImageNet normalization, resize to 1600x533 and the
+bottom 320 rows, with four outputs: `loc_row`, `loc_col`, `exist_row`, `exist_col`.
+Decoded anchors map to the original ROI, including the training crop.
+
+Verified official checkpoint SHA-256:
+`956616371ee758551c455d28c1c8a9732b39d7fbd85bc70b9869424a5121f967`.
+ONNX serialization checksums vary with export software; the script prints its
+checksum and validates the graph. It refuses to replace a model unless `--force` is set.
+
+Sources: [author's model and license](https://github.com/cfzd/Ultra-Fast-Lane-Detection-v2),
+[CULane configuration](https://github.com/cfzd/Ultra-Fast-Lane-Detection-v2/blob/master/configs/culane_res18.py),
+[reference decoding](https://github.com/cfzd/Ultra-Fast-Lane-Detection-v2/blob/master/demo.py).
+
+### Optional NVIDIA runtime
+
+CPU execution remains available. For compatible CUDA 12 / cuDNN 9 installations:
+
+```powershell
+.venv/Scripts/python.exe -m pip uninstall -y onnxruntime
+.venv/Scripts/python.exe -m pip install -r requirements-gpu.txt
+```
+
+The tested environment uses PyTorch 2.7.1+cu126 to supply CUDA DLLs, ONNX Runtime
+GPU 1.21.1 and a GTX 1650. `auto` uses CUDA when available, with CPU fallback;
+an explicit `cuda` request fails if CUDA cannot initialize. The summary reports
+the actual provider. Do not install CPU and GPU ONNX Runtime distributions
+together because they provide the same Python module.
+See [ONNX Runtime's CUDA setup](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html).
+
+An optional FP16 export (~413 MB) can be produced with `--fp16` after installing
+`onnxconverter-common`. It keeps float32 input/output and needs GPU execution;
+it is not automatically selected. Compare its outputs on your footage before use.
+
 > **Phụ trách:** Quang (Branch `quang`)  
 > **Chính sách Git:** File trọng số `*.onnx` / `*.pth` có dung lượng lớn (~233.5 MB) nên **không commit lên Git**. Đặt file đúng tên chuẩn `models/ufld_tusimple.onnx` trước khi chạy ứng dụng hoặc benchmark.
 

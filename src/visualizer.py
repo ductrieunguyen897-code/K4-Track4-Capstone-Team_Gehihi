@@ -16,6 +16,7 @@ def _draw_dashed_line(
     thickness: int = 2,
     dash_length: int = 10,
     gap_length: int = 8,
+    phase_offset: float = 0.0,
 ) -> None:
     """Draw a dashed line between two points."""
     dist = np.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
@@ -24,12 +25,14 @@ def _draw_dashed_line(
     dx = (pt2[0] - pt1[0]) / dist
     dy = (pt2[1] - pt1[1]) / dist
 
-    curr_dist = 0.0
+    curr_dist = -(phase_offset % (dash_length + gap_length))
     while curr_dist < dist:
         end_dist = min(curr_dist + dash_length, dist)
-        start_pt = (int(pt1[0] + dx * curr_dist), int(pt1[1] + dy * curr_dist))
-        end_pt = (int(pt1[0] + dx * end_dist), int(pt1[1] + dy * end_dist))
-        cv2.line(img, start_pt, end_pt, color, thickness, lineType=cv2.LINE_AA)
+        if end_dist > 0:
+            start_dist = max(curr_dist, 0.0)
+            start_pt = (int(pt1[0] + dx * start_dist), int(pt1[1] + dy * start_dist))
+            end_pt = (int(pt1[0] + dx * end_dist), int(pt1[1] + dy * end_dist))
+            cv2.line(img, start_pt, end_pt, color, thickness, lineType=cv2.LINE_AA)
         curr_dist += dash_length + gap_length
 
 
@@ -125,7 +128,12 @@ def render_frame(
         if is_predicted:
             # Predicted lane: Amber/Orange with dashed / thinner polyline
             color = (0, 165, 255)  # BGR orange
-            cv2.polylines(canvas, [pts_arr], isClosed=False, color=color, thickness=2, lineType=cv2.LINE_AA)
+            # Mark retained history clearly, since it is not a current observation.
+            phase = 0.0
+            for start, end in zip(pts_clean, pts_clean[1:]):
+                _draw_dashed_line(canvas, tuple(start), tuple(end), color=color, thickness=2,
+                                  dash_length=6, gap_length=8, phase_offset=phase)
+                phase += float(np.hypot(end[0] - start[0], end[1] - start[1]))
             tag = f"Trk#{track_id} (P)" if track_id is not None else "Lane (P)"
         else:
             # Observed lane: Bright Cyan

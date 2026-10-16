@@ -51,11 +51,12 @@ def _points(raw, width, height):
         return None
 
 
-def analyze_lanes(tracking: dict, camera_center_ratio: float = 0.5) -> dict:
+def analyze_lanes(tracking: dict, camera_center_ratio: float = 0.5,
+                  reference_y_ratio: float = 0.85) -> dict:
     """Analyze the currently observed ego-lane in image coordinates.
 
     Select the nearest boundaries strictly bracketing the camera at
-    round(0.85*(H-1)); never extrapolate. Positive offset means camera right
+    round(reference_y_ratio*(H-1)); never extrapolate. Positive offset means camera right
     of lane center. Widths below 0.06*W are rejected as a demo heuristic.
     Warning thresholds on absolute offset are 0.15 and 0.25 (inclusive).
 
@@ -72,6 +73,8 @@ def analyze_lanes(tracking: dict, camera_center_ratio: float = 0.5) -> dict:
     """
     if not _number(camera_center_ratio) or not 0 <= camera_center_ratio <= 1:
         raise ValueError("camera_center_ratio must be a finite number in [0, 1]")
+    if not _number(reference_y_ratio) or not 0 < reference_y_ratio < 1:
+        raise ValueError("reference_y_ratio must be a finite number in (0, 1)")
     result = {
         "valid_lane": False,
         "reference_y": 0,
@@ -98,7 +101,7 @@ def analyze_lanes(tracking: dict, camera_center_ratio: float = 0.5) -> dict:
     width, height = tracking.get("frame_width"), tracking.get("frame_height")
     if not (_integer(width) and _integer(height) and width >= 2 and height >= 2):
         return result
-    ref = round(0.85 * (height - 1))
+    ref = round(reference_y_ratio * (height - 1))
     vehicle = float(camera_center_ratio * (width - 1))
     result.update(reference_y=int(ref), vehicle_center_x=vehicle)
     candidates = []

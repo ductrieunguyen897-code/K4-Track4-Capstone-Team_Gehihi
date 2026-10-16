@@ -62,31 +62,31 @@ def refine_lanes(lanes: list[dict], response: np.ndarray, width: int, height: in
     """
     sy, sx = response.shape[0] / height, response.shape[1] / width
     radius = max(3, round(0.018 * response.shape[1]))
+    minimum_span = 0.3 * (0.97 - road_start) * height
     refined, scores = [], []
     for lane in lanes:
         points = np.asarray(lane['points'], dtype=float)
         lo = max(points[0, 1], road_start * height)
         hi = min(points[-1, 1], 0.97 * height)
-        if hi - lo < 0.14 * height:
+        if hi - lo < minimum_span:
             continue
         ys = np.linspace(lo, hi, 80)
         expected = np.interp(ys, points[:, 1], points[:, 0])
-        hits = []
-        for y, x in zip(ys, expected):
-            row = min(response.shape[0] - 1, round(y * sy))
-            center = round(x * sx)
-            start, stop = max(0, center - radius), min(response.shape[1], center + radius + 1)
-            band = response[row, start:stop].astype(float)
-            if not len(band):
-                continue
-            # Penalize distant candidates so nearby paint wins over another lane.
-            distances = np.abs(np.arange(start, stop) - center)
-            best = int(np.argmax(band - distances * 0.7))
-            if band[best] >= 18:
-                hits.append(((start + best) / sx, y))
-        if len(hits) < 10:
+        # Search all rows at once: repeated Python/NumPy calls per row were
+        # a substantial part of inference time on full-HD dashcam footage.
+        image_rows = np.clip(np.rint(ys * sy).astype(int), 0, response.shape[0] - 1)
+        centers = np.rint(expected * sx).astype(int)
+        offsets = np.arange(-radius, radius + 1)
+        columns = centers[:, None] + offsets
+        in_bounds = (columns >= 0) & (columns < response.shape[1])
+        bands = response[image_rows[:, None], np.clip(columns, 0, response.shape[1] - 1)].astype(float)
+        candidate_scores = np.where(in_bounds, bands - np.abs(offsets) * 0.7, -np.inf)
+        best = candidate_scores.argmax(axis=1)
+        chosen = np.arange(len(ys)), best
+        supported = in_bounds[chosen] & (bands[chosen] >= 18)
+        if supported.sum() < 10:
             continue
-        hits = np.asarray(hits)
+        hits = np.column_stack((columns[chosen][supported] / sx, ys[supported]))
         keep = np.ones(len(hits), dtype=bool)
         for _ in range(3):
             if keep.sum() < 10:
@@ -94,18 +94,23 @@ def refine_lanes(lanes: list[dict], response: np.ndarray, width: int, height: in
             coeff = np.polyfit(hits[keep, 1] / height, hits[keep, 0] / width, 2)
             residual = np.abs(np.polyval(coeff, hits[:, 1] / height) * width - hits[:, 0])
             keep = residual <= max(0.006 * width, 2.5 * float(np.median(residual)))
-        if keep.sum() < 10 or np.ptp(hits[keep, 1]) < 0.14 * height:
+        if keep.sum() < 10 or np.ptp(hits[keep, 1]) < minimum_span:
             continue
         coeff = np.polyfit(hits[keep, 1] / height, hits[keep, 0] / width, 2)
         # Limit the visible curve to supported road rows; small gaps cover dashes.
         low = max(lo, hits[keep, 1].min())
-        high = min(hi, hits[keep, 1].max() + 0.04 * height)
+        # A near-field dash gap can exceed 4% of the full image. Continue
+        # along existing model samples across a bounded gap in the road ROI.
+        # Never extend past the model's own observed domain.
+        high = min(hi, hits[keep, 1].max() + minimum_span)
         rows = np.unique(np.rint(np.linspace(low, high, 40)).astype(int))
         base = np.interp(rows, points[:, 1], points[:, 0])
-        fitted = np.polyval(coeff, rows / height) * width
+        supported_rows = np.clip(rows, hits[keep, 1].min(), hits[keep, 1].max())
+        fitted = np.polyval(coeff, supported_rows / height) * width
+        supported_base = np.interp(supported_rows, points[:, 1], points[:, 0])
         # Preserve the model's curve outside a narrow correction band. A fit
         # through intermittent dashes must not bend onto another boundary.
-        xs = np.rint(base + np.clip(fitted - base, -0.012 * width, 0.012 * width)).astype(int)
+        xs = np.rint(base + np.clip(fitted - supported_base, -0.012 * width, 0.012 * width)).astype(int)
         inside = (xs >= 0) & (xs < width)
         pts = np.column_stack((xs[inside], rows[inside])).tolist()
         if len(pts) < 2:

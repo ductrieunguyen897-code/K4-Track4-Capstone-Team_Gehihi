@@ -6,7 +6,9 @@ LaneDetector.detect() -> LaneTracker.update() -> analyze_lanes() -> render_frame
 """
 
 import csv
+from functools import partial
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -48,6 +50,10 @@ def _transcode_to_h264(raw_mp4_path: str, target_mp4_path: str) -> bool:
         raw_mp4_path,
         "-vcodec",
         "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "22",
         "-pix_fmt",
         "yuv420p",
         "-movflags",
@@ -72,6 +78,9 @@ def process_video(
     tracker: Any = None,
     analyzer: Any = None,
     road_crop_ratio: Optional[float] = None,
+    device: str = "auto",
+    start_time_s: float = 0.0,
+    reference_y_ratio: float = 0.9,
 ) -> Dict[str, Any]:
     """Process an input MP4 video through detection, tracking, analysis, and rendering.
 
@@ -86,6 +95,9 @@ def process_video(
         tracker: Optional pre-instantiated LaneTracker (for testing / dependency injection).
         analyzer: Optional analyze_lanes callable (for testing / dependency injection).
         road_crop_ratio: None for automatic framing; otherwise crop 0 to 50% from the top.
+        device: auto selects available CUDA with CPU fallback; cpu forces CPU.
+        start_time_s: Start analysis at this source timestamp, preserving CSV timestamps.
+        reference_y_ratio: Image row used for vehicle position; default is near the vehicle.
 
     Returns:
         Dictionary following the contract:
@@ -107,6 +119,10 @@ def process_video(
     # 1. Validate input video
     if max_frames is not None and (isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0):
         raise ValueError("max_frames must be a positive integer or None")
+    if isinstance(start_time_s, bool) or not isinstance(start_time_s, (int, float)) or not math.isfinite(start_time_s) or start_time_s < 0:
+        raise ValueError("start_time_s must be a finite nonnegative number")
+    if isinstance(reference_y_ratio, bool) or not isinstance(reference_y_ratio, (int, float)) or not math.isfinite(reference_y_ratio) or not 0 < reference_y_ratio < 1:
+        raise ValueError("reference_y_ratio must be a finite number in (0, 1)")
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input video file not found: {input_path}")
 
@@ -125,8 +141,19 @@ def process_video(
         cap.release()
         raise ValueError(f"Invalid video dimensions: {width}x{height}")
 
-    # Determine frame limit
-    target_frames = total_video_frames if total_video_frames > 0 else None
+    start_frame = int(round(start_time_s * video_fps))
+    if total_video_frames > 0 and start_frame >= total_video_frames:
+        cap.release()
+        raise ValueError("Start time is outside the video duration")
+    calibration_frame = None
+    if start_frame:
+        ok, calibration_frame = cap.read()
+        if not ok or not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
+            cap.release()
+            raise ValueError("Could not seek to the requested start time")
+
+    # Determine frame limit within the remaining source interval.
+    target_frames = total_video_frames - start_frame if total_video_frames > 0 else None
     if max_frames is not None and max_frames > 0:
         target_frames = min(target_frames, max_frames) if target_frames else max_frames
 
@@ -147,7 +174,7 @@ def process_video(
             )
         try:
             from src.detector import LaneDetector
-            detector = LaneDetector(model_path=model_path, device="cpu", road_crop_ratio=road_crop_ratio)
+            detector = LaneDetector(model_path=model_path, device=device, road_crop_ratio=road_crop_ratio)
         except ImportError as err:
             cap.release()
             raise RuntimeError(
@@ -169,7 +196,7 @@ def process_video(
     if analyzer is None:
         try:
             from src.geometry import analyze_lanes
-            analyzer = analyze_lanes
+            analyzer = partial(analyze_lanes, reference_y_ratio=reference_y_ratio)
         except ImportError as err:
             cap.release()
             raise RuntimeError(
@@ -180,6 +207,8 @@ def process_video(
     # Reset tracker state at the start of a new video
     if hasattr(detector, "reset") and callable(detector.reset):
         detector.reset()
+    if calibration_frame is not None and callable(getattr(detector, 'calibrate', None)):
+        detector.calibrate(calibration_frame)
     if hasattr(tracker, "reset") and callable(tracker.reset):
         tracker.reset()
 
@@ -224,7 +253,7 @@ def process_video(
             if not ok or frame is None:
                 break
 
-            frame_idx = frames_processed
+            frame_idx = start_frame + frames_processed
             time_s = frame_idx / video_fps
 
             det_ms = 0.0
@@ -345,6 +374,11 @@ def process_video(
         "failed_frames": failed_frames,
         "unknown_lane_frames": frames_processed - valid_lane_frames,
         "frame_errors": frame_errors,
+        "execution_provider": getattr(detector, "execution_provider", "external"),
+        "model_kind": getattr(detector, "model_kind", "external"),
+        "road_crop_ratio": getattr(detector, "_selected_crop", road_crop_ratio),
+        "source_start_seconds": start_frame / video_fps,
+        "reference_y_ratio": reference_y_ratio,
     }
 
     return {
