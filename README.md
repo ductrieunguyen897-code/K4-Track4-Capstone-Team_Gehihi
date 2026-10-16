@@ -137,7 +137,28 @@ python app.py
 > `requirements.txt` and `app.py` are owned by Triệu; if a dependency is missing,
 > tell Triệu rather than editing those files yourself.
 
-### Benchmark
+### Camera framing and unsupported detections
+
+The detector now checks its proposals against nearby white/yellow marking
+contrast and applies a bounded correction to the visible curve. Unsupported
+proposals are removed; missing boundaries produce `UNKNOWN`. This check can
+also miss faint markings, and is not a calibrated confidence score.
+
+**Vùng ảnh nhận diện đường** in the advanced settings selects camera framing.
+Automatic mode estimates the road horizon on the first frame and, for cameras
+showing a large sky area, selects a crop of the upper 20%, 35% or 45% of the
+image. The selection stays fixed during the video. Use an explicit crop if the
+first frame is obscured or the automatic selection is unsuitable. Coordinates
+are mapped back onto the full original frame. `None` enables automatic framing
+in `LaneDetector(..., road_crop_ratio=None)` and `process_video(...)`; `0.0`
+selects the full image. The tracker restores newly visible rows after an
+occlusion instead of permanently shortening a boundary.
+
+The summary includes `unknown_lane_frames`, `failed_frames` and up to five
+`frame_errors`; the UI flags processing errors instead of reporting unqualified
+success. A frame with two accepted boundaries is **not** an accuracy measurement.
+
+### Benchmark command
 
 ```bash
 python benchmark.py --input data/sample_lines.mp4 --model models/ufld_tusimple.onnx --max-frames 300
@@ -191,6 +212,10 @@ highway, yellow-lane and a curve/shadow "challenge" clip. Download with
 Measured results go in `results/`. **No numbers are published here until they
 are measured on real hardware** — see `results/benchmark_<clip>_report.md` after
 a run.
+
+Historical measurements before the image-support filter and camera-framing
+changes below; these numbers do not describe the current detector. Current
+verification results are in [`results/lane_fix_validation.md`](results/lane_fix_validation.md).
 
 Measured on the real pretrained `models/ufld_tusimple.onnx` with the full
 `detect → track → analyze → render` pipeline (`benchmark.py`, ONNX Runtime CPU):

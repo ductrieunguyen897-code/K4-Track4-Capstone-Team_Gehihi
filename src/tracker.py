@@ -16,7 +16,8 @@ class LaneTracker:
     Greedy one-to-one matching uses mean horizontal distance / frame width
     at eight evenly spaced y samples in each pair's observed overlap. Pairs
     need two distinct shared y values and distance <= 0.08. EMA uses the union
-    of polyline vertices within that overlap, never extrapolating. Missing
+    of polyline vertices within the current observation, never extrapolating.
+    Newly observed rows are retained without smoothing against missing history. Missing
     tracks hold their last smoothed points, without motion prediction or
     confidence inflation. IDs increase until reset; output is ordered by ID.
 
@@ -130,21 +131,23 @@ class LaneTracker:
                 "tracking_ms": (perf_counter() - started) * 1000.0}
 
     def _smooth(self, previous: np.ndarray, current: np.ndarray) -> np.ndarray:
-        """Apply EMA at both polylines' vertices inside their shared domain.
+        """Apply EMA in the overlap and retain newly visible observed rows.
 
         Args:
             previous: Sorted Nx2 smoothed pixel points.
             current: Sorted Mx2 observed pixel points with positive y overlap.
 
         Returns:
-            New sorted pixel points, restricted to the observed overlap.
+            New sorted pixel points covering the current observation.
         """
         lo = max(previous[0, 1], current[0, 1])
         hi = min(previous[-1, 1], current[-1, 1])
         ys = np.unique(np.concatenate((previous[:, 1], current[:, 1])))
-        ys = ys[(ys >= lo) & (ys <= hi)]
-        xs = (self._alpha * np.interp(ys, current[:, 1], current[:, 0])
-              + (1 - self._alpha) * np.interp(ys, previous[:, 1], previous[:, 0]))
+        ys = ys[(ys >= current[0, 1]) & (ys <= current[-1, 1])]
+        xs = np.interp(ys, current[:, 1], current[:, 0])
+        overlap = (ys >= lo) & (ys <= hi)
+        xs[overlap] = (self._alpha * xs[overlap]
+                       + (1 - self._alpha) * np.interp(ys[overlap], previous[:, 1], previous[:, 0]))
         return np.column_stack((xs, ys))
 
     @staticmethod

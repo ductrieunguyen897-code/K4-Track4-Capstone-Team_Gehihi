@@ -21,6 +21,7 @@ def analyze_video_callback(
     model_path: str,
     max_frames_input: float,
     process_all_frames: bool,
+    road_crop_ratio: Optional[float] = None,
     progress=gr.Progress(),
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str], str]:
     """Execute video pipeline and return processed video, metrics, and CSV file.
@@ -31,6 +32,7 @@ def analyze_video_callback(
         model_path: Path to ONNX model weights.
         max_frames_input: Max frames slider value.
         process_all_frames: If True, ignore max_frames limit and process all.
+        road_crop_ratio: None or -1 for auto; otherwise fraction cropped from top.
         progress: Gradio progress tracker.
 
     Returns:
@@ -91,6 +93,7 @@ def analyze_video_callback(
             camera_center_ratio=float(camera_center_ratio),
             max_frames=limit_frames,
             progress_callback=update_progress,
+            road_crop_ratio=None if road_crop_ratio == -1 else road_crop_ratio,
         )
 
         summary = result["summary"]
@@ -103,11 +106,15 @@ def analyze_video_callback(
             f"({summary['processing_seconds']}s @ **{summary['processing_fps']} FPS** thực đo)\n"
             f"- **FPS nguồn:** {summary['video_fps']} FPS | "
             f"**Inference TB:** {summary['avg_inference_ms']} ms/frame\n"
-            f"- **Frame hợp lệ (đủ làn):** {summary['valid_lane_frames']}/{summary['frames_processed']} "
+            f"- **Frame có đủ hai biên để tính độ lệch:** {summary['valid_lane_frames']}/{summary['frames_processed']} "
             f"({(summary['valid_lane_frames'] / max(1, summary['frames_processed']) * 100):.1f}%)\n"
             f"- **Frame cảnh báo (WARNING):** {summary['warning_frames']} frames\n"
             f"- **File CSV:** `{os.path.basename(csv_path)}` sẵn sàng tải về."
         )
+        status_msg += "\n\nTỷ lệ đủ hai biên không phải độ chính xác nhận diện. UNKNOWN = chưa đủ bằng chứng để tính độ lệch."
+        if summary['failed_frames']:
+            status_msg = status_msg.replace("✅ **Phân tích hoàn tất thành công!**", "⚠️ **Đã xử lý video nhưng có frame lỗi.**")
+            status_msg += f"\n\n⚠️ **{summary['failed_frames']} frame lỗi xử lý.** Xem `frame_errors` trong thống kê."
 
         return final_video, summary, csv_path, status_msg
 
@@ -172,6 +179,16 @@ def build_app() -> gr.Blocks:
                         value=DEFAULT_MODEL_PATH,
                         info="Model pretrained UFLD (mặc định: models/ufld_tusimple.onnx)",
                     )
+                    road_crop_input = gr.Dropdown(
+                        choices=[("Tự động theo góc camera", -1.0),
+                                 ("Toàn ảnh (video mẫu)", 0.0),
+                                 ("Bỏ 20% phía trên", 0.2),
+                                 ("Bỏ 35% phía trên", 0.35),
+                                 ("Bỏ 45% phía trên (camera nhiều trời)", 0.45)],
+                        value=-1.0,
+                        label="Vùng ảnh nhận diện đường",
+                        info="Nếu đường vẽ lệch lên trời, thử bỏ 35% hoặc 45% phía trên ảnh.",
+                    )
                     with gr.Row():
                         max_frames_slider = gr.Slider(
                             minimum=30,
@@ -224,6 +241,7 @@ def build_app() -> gr.Blocks:
                 model_path_input,
                 max_frames_slider,
                 process_all_checkbox,
+                road_crop_input,
             ],
             outputs=[
                 output_video,

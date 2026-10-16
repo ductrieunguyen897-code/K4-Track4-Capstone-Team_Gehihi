@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -327,6 +328,31 @@ class TestVideoPipeline(unittest.TestCase):
                 model_path="dummy.onnx",
             )
 
+    def test_processing_failures_are_reported_and_keep_video_length(self):
+        detector = MockLaneDetector()
+        detector.detect = lambda frame: (_ for _ in ()).throw(RuntimeError("inference unavailable"))
+        result = process_video(
+            input_path=self.synthetic_video,
+            output_path=os.path.join(self.test_dir, "output_errors.mp4"),
+            model_path="dummy.onnx",
+            max_frames=7,
+            detector=detector,
+            tracker=MockLaneTracker(),
+            analyzer=mock_analyze_lanes_safe,
+        )
+        summary = result['summary']
+        self.assertEqual(summary['failed_frames'], 7)
+        self.assertEqual(summary['unknown_lane_frames'], 7)
+        self.assertEqual(summary['valid_lane_frames'], 0)
+        self.assertEqual(len(summary['frame_errors']), 5)
+        self.assertEqual(summary['frame_errors'][0], {'frame_index': 0, 'error': 'inference unavailable'})
+        cap = cv2.VideoCapture(result['output_video'])
+        count = 0
+        while cap.read()[0]:
+            count += 1
+        cap.release()
+        self.assertEqual(count, 7)
+
     def test_pipeline_missing_model_file(self):
         with self.assertRaises(FileNotFoundError):
             process_video(
@@ -342,6 +368,25 @@ class TestGradioApp(unittest.TestCase):
     def test_build_app_instantiation(self):
         demo = build_app()
         self.assertIsNotNone(demo)
+
+    def test_callback_forwards_framing_and_reports_partial_failure(self):
+        summary = dict(frames_processed=10, processing_seconds=1, processing_fps=10,
+                       video_fps=30, avg_inference_ms=50, valid_lane_frames=7,
+                       warning_frames=0, failed_frames=2)
+        result = dict(output_video='preview.mp4', csv_path='preview.csv', summary=summary)
+        for crop, expected in ((-1.0, None), (0.35, 0.35)):
+            with self.subTest(crop=crop), tempfile.TemporaryDirectory() as directory:
+                video_path = os.path.join(directory, 'input.mp4')
+                model_path = os.path.join(directory, 'model.onnx')
+                for path in (video_path, model_path):
+                    open(path, 'wb').close()
+                with patch('app.process_video', return_value=result) as process:
+                    video, _, _, message = analyze_video_callback(
+                        video_path, 0.5, model_path, 10, False, road_crop_ratio=crop)
+                self.assertEqual(process.call_args.kwargs['road_crop_ratio'], expected)
+                self.assertEqual(video, 'preview.mp4')
+                self.assertIn('2 frame', message)
+                self.assertNotIn('hoàn tất thành công', message)
 
     def test_analyze_callback_missing_video(self):
         video, summary, csv_file, msg = analyze_video_callback(

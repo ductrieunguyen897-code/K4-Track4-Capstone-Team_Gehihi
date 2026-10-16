@@ -15,6 +15,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from src.lane_evidence import estimate_horizon, marking_response, refine_lanes
+
 # Standard row anchors defined in the 288-height coordinate system of UFLD
 TUSIMPLE_ROW_ANCHOR: list[int] = [
     64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112,
@@ -63,7 +65,7 @@ def _interpolate_x_at_y(points: list[list[int]], target_y: float) -> float:
 class LaneDetector:
     """Ultra-Fast-Lane-Detection (UFLD) ONNX inference adapter."""
 
-    def __init__(self, model_path: str, device: str = "cpu") -> None:
+    def __init__(self, model_path: str, device: str = "cpu", road_crop_ratio: float | None = None) -> None:
         """Load ONNX session once. Raise FileNotFoundError if weights are missing."""
         if not model_path or not isinstance(model_path, str):
             raise FileNotFoundError(
@@ -79,6 +81,13 @@ class LaneDetector:
 
         self.model_path = model_path
         self.device = (device or "cpu").lower()
+        if road_crop_ratio is not None and (
+            isinstance(road_crop_ratio, bool) or not isinstance(road_crop_ratio, (int, float))
+            or not math.isfinite(road_crop_ratio) or not 0 <= road_crop_ratio <= 0.5
+        ):
+            raise ValueError("road_crop_ratio must be None (auto) or a number in [0, 0.5]")
+        self.road_crop_ratio = road_crop_ratio
+        self.reset()
 
         available_providers = ort.get_available_providers()
         providers: list[str] = []
@@ -204,7 +213,9 @@ class LaneDetector:
 
         col_sample = np.linspace(0, self.input_width - 1, griding_num)
         col_sample_w = float(col_sample[1] - col_sample[0]) if griding_num > 1 else 1.0
-        anchor_ref_h = float(self.input_height) if self.input_height > 0 else 288.0
+        # Row anchors always use the training reference height, even for exports
+        # whose input resolution differs from the original 288 pixels.
+        anchor_ref_h = 288.0
 
         candidate_lanes: list[list[list[int]]] = []
 
@@ -258,14 +269,43 @@ class LaneDetector:
 
         return lanes_out
 
+    def reset(self) -> None:
+        """Forget automatic camera framing between video streams."""
+        self._selected_crop = self.road_crop_ratio
+        self._frame_size = None
+
+    def _detect_crop(self, frame_bgr: np.ndarray, crop: float) -> list[dict[str, Any]]:
+        height, width = frame_bgr.shape[:2]
+        top = round(height * crop)
+        tensor = self._preprocess(frame_bgr[top:])
+        output = self.session.run([self.output_name], {self.input_name: tensor})[0]
+        lanes = self._decode_output(output, frame_w=width, frame_h=height - top)
+        for lane in lanes:
+            for point in lane['points']:
+                point[1] += top
+        return lanes
+
     def detect(self, frame_bgr: np.ndarray) -> dict[str, Any]:
         """Run UFLD ONNX lane detection on a single BGR frame without modifying frame_bgr."""
         frame_h, frame_w = self._validate_frame(frame_bgr)
 
         t0 = time.perf_counter()
-        input_tensor = self._preprocess(frame_bgr)
-        outputs = self.session.run([self.output_name], {self.input_name: input_tensor})
-        lanes = self._decode_output(outputs[0], frame_w=frame_w, frame_h=frame_h)
+        if self._frame_size != (frame_w, frame_h):
+            self.reset()
+            self._frame_size = (frame_w, frame_h)
+        response = marking_response(frame_bgr)
+        if self._selected_crop is None:
+            horizon = estimate_horizon(response)
+            # Calibrate once so per-frame crop changes do not shake the overlay.
+            # Bring the estimated horizon near the training framing. Do not
+            # select by the number of detections: vehicles and compression can
+            # change that count even when the camera itself has not moved.
+            target_crop = max(0.0, min(0.45, (horizon - 0.55) / 0.45))
+            self._selected_crop = (min((0.2, 0.35, 0.45), key=lambda crop: abs(crop - target_crop))
+                                   if horizon > 0.64 else 0.0)
+        proposed = self._detect_crop(frame_bgr, self._selected_crop)
+        lanes, _ = refine_lanes(proposed, response, frame_w, frame_h,
+                                max(0.52, self._selected_crop + 0.45 * (1 - self._selected_crop)))
         inference_ms = float((time.perf_counter() - t0) * 1000.0)
 
         return {

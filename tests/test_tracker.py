@@ -135,6 +135,20 @@ class LaneTrackerTests(unittest.TestCase):
                 self.assertEqual([t["track_id"] for t in tracks], [1, 2])
                 self.assertTrue(tracks[0]["predicted"])
 
+    def test_recovered_observation_restores_bottom_and_geometry(self):
+        """A brief occlusion must not permanently remove the measurement row."""
+        from src.geometry import analyze_lanes
+
+        tracker = LaneTracker()
+        tracker.update(frame(lane(200, (180, 350)), lane(440, (180, 350))))
+        shortened = tracker.update(frame(lane(200, (180, 260)), lane(440, (180, 350))))
+        self.assertFalse(analyze_lanes(shortened)['valid_lane'])
+        recovered = tracker.update(frame(lane(202, (160, 350)), lane(442, (160, 350))))
+        self.assertEqual([t['track_id'] for t in recovered['lanes']], [1, 2])
+        self.assertTrue(analyze_lanes(recovered)['valid_lane'])
+        self.assertEqual(recovered['lanes'][0]['points'][0], [202.0, 160.0])
+        self.assertEqual(recovered['lanes'][0]['points'][-1], [202.0, 350.0])
+
     def test_reset_clears_state_and_allows_new_dimensions(self):
         """Start each video with ID 1 and no retained tracks."""
         tracker = LaneTracker()

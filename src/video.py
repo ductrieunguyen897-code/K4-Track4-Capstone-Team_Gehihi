@@ -6,6 +6,7 @@ LaneDetector.detect() -> LaneTracker.update() -> analyze_lanes() -> render_frame
 """
 
 import csv
+import logging
 import os
 import shutil
 import subprocess
@@ -70,6 +71,7 @@ def process_video(
     detector: Any = None,
     tracker: Any = None,
     analyzer: Any = None,
+    road_crop_ratio: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Process an input MP4 video through detection, tracking, analysis, and rendering.
 
@@ -83,6 +85,7 @@ def process_video(
         detector: Optional pre-instantiated LaneDetector (for testing / dependency injection).
         tracker: Optional pre-instantiated LaneTracker (for testing / dependency injection).
         analyzer: Optional analyze_lanes callable (for testing / dependency injection).
+        road_crop_ratio: None for automatic framing; otherwise crop 0 to 50% from the top.
 
     Returns:
         Dictionary following the contract:
@@ -102,6 +105,8 @@ def process_video(
         }
     """
     # 1. Validate input video
+    if max_frames is not None and (isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0):
+        raise ValueError("max_frames must be a positive integer or None")
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input video file not found: {input_path}")
 
@@ -142,7 +147,7 @@ def process_video(
             )
         try:
             from src.detector import LaneDetector
-            detector = LaneDetector(model_path=model_path, device="cpu")
+            detector = LaneDetector(model_path=model_path, device="cpu", road_crop_ratio=road_crop_ratio)
         except ImportError as err:
             cap.release()
             raise RuntimeError(
@@ -173,6 +178,8 @@ def process_video(
             ) from err
 
     # Reset tracker state at the start of a new video
+    if hasattr(detector, "reset") and callable(detector.reset):
+        detector.reset()
     if hasattr(tracker, "reset") and callable(tracker.reset):
         tracker.reset()
 
@@ -204,6 +211,7 @@ def process_video(
     warning_frames = 0
     failed_frames = 0
     total_detector_ms = 0.0
+    frame_errors = []
 
     start_wall_clock = time.time()
 
@@ -266,8 +274,11 @@ def process_video(
                     is_valid,
                 ])
 
-            except Exception:
+            except Exception as exc:
                 failed_frames += 1
+                if len(frame_errors) < 5:
+                    frame_errors.append({"frame_index": frame_idx, "error": str(exc)})
+                    logging.getLogger(__name__).exception("Lane processing failed at frame %s", frame_idx)
                 # Fallback: write original frame with error overlay, record UNKNOWN
                 fallback_analysis = {
                     "valid_lane": False,
@@ -332,6 +343,8 @@ def process_video(
         "valid_lane_frames": valid_lane_frames,
         "warning_frames": warning_frames,
         "failed_frames": failed_frames,
+        "unknown_lane_frames": frames_processed - valid_lane_frames,
+        "frame_errors": frame_errors,
     }
 
     return {
